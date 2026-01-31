@@ -14,15 +14,30 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::slice;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 use crate::bindings::*;
+use crate::entropy::{EntropySource, GetrandomSource};
 use crate::pkey::EvpPkey;
 use crate::signature::SigAlg;
 use crate::{cstr, Error, ErrorKind, OsslContext};
 
-use getrandom;
 use libc;
+
+/* Entropy Source Configuration */
+
+/// The global entropy source used by the FIPS provider.
+/// This can be configured at startup before FIPS initialization.
+static ENTROPY_SOURCE: LazyLock<RwLock<Box<dyn EntropySource>>> =
+    LazyLock::new(|| RwLock::new(Box::new(GetrandomSource::new())));
+
+/// Internal function to get entropy using the configured source.
+fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
+    let guard = ENTROPY_SOURCE
+        .read()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned");
+    guard.get_entropy(buf)
+}
 
 /* Entropy Stuff */
 unsafe extern "C" fn fips_get_entropy(
@@ -50,7 +65,7 @@ unsafe extern "C" fn fips_get_entropy(
         return 0;
     }
     let r = unsafe { slice::from_raw_parts_mut(out as *mut u8, len) };
-    if getrandom::fill(r).is_err() {
+    if get_entropy_internal(r).is_err() {
         unsafe { fips_clear_free(out, len, null(), 0) };
         return 0;
     }
