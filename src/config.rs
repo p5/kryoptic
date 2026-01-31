@@ -202,11 +202,36 @@ impl Default for EcPointEncoding {
     }
 }
 
+/// Entropy source configuration for FIPS mode.
+///
+/// Specifies which entropy source to use for cryptographic operations.
+/// This is particularly important for FIPS compliance where the entropy
+/// source must meet SP800-90B requirements.
+#[cfg(feature = "fips")]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum EntropySourceConfig {
+    /// Automatically select the appropriate FIPS-compliant entropy source.
+    /// - Kernel FIPS mode: uses getrandom (kernel provides FIPS entropy)
+    /// - Non-FIPS kernel: uses jitterentropy (SP800-90B compliant)
+    /// This is the recommended setting for portable FIPS compliance.
+    #[default]
+    Auto,
+    /// Use the kernel's getrandom() syscall.
+    /// Only FIPS-approved when the kernel is in FIPS mode.
+    Getrandom,
+    /// Use jitterentropy only.
+    /// FIPS-approved on any system (SP800-90B compliant).
+    /// Requires the `jitterentropy` feature.
+    Jitterentropy,
+}
+
 /// Add tweaks for behavior in FIPS mode.
 #[cfg(feature = "fips")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FipsBehavior {
     /// Changes behavior of token in slot to always enforce keys to be private
+    #[serde(default)]
     pub keys_always_sensitive: bool,
 }
 
@@ -215,6 +240,58 @@ impl Default for FipsBehavior {
     fn default() -> Self {
         FipsBehavior {
             keys_always_sensitive: false,
+        }
+    }
+}
+
+#[cfg(feature = "fips")]
+impl EntropySourceConfig {
+    /// Apply this entropy source configuration.
+    ///
+    /// This should be called once during initialization, before any
+    /// cryptographic operations are performed.
+    ///
+    /// # Returns
+    /// - `Ok(name)` - The name of the entropy source that was configured
+    /// - `Err(msg)` - Error message if configuration failed
+    pub fn apply(&self) -> std::result::Result<&'static str, String> {
+        use ossl::fips;
+
+        match self {
+            EntropySourceConfig::Auto => {
+                #[cfg(feature = "jitterentropy")]
+                {
+                    fips::use_fips_compliant_entropy()
+                        .map_err(|_| "Failed to configure FIPS-compliant entropy".to_string())
+                }
+                #[cfg(not(feature = "jitterentropy"))]
+                {
+                    // Without jitterentropy, we can only use getrandom
+                    fips::use_getrandom_entropy();
+                    if fips::is_kernel_fips_mode() {
+                        Ok("getrandom")
+                    } else {
+                        Err("Kernel not in FIPS mode and jitterentropy not available. \
+                             Enable 'jitterentropy' feature for FIPS compliance.".to_string())
+                    }
+                }
+            }
+            EntropySourceConfig::Getrandom => {
+                fips::use_getrandom_entropy();
+                Ok("getrandom")
+            }
+            EntropySourceConfig::Jitterentropy => {
+                #[cfg(feature = "jitterentropy")]
+                {
+                    fips::use_jitterentropy_entropy()
+                        .map(|_| "jitterentropy")
+                        .map_err(|_| "Jitterentropy not available on this system".to_string())
+                }
+                #[cfg(not(feature = "jitterentropy"))]
+                {
+                    Err("Jitterentropy requested but 'jitterentropy' feature not enabled".to_string())
+                }
+            }
         }
     }
 }
@@ -229,6 +306,10 @@ pub struct Config {
     /// Type of encoding for EC Public Points
     #[serde(default)]
     pub ec_point_encoding: EcPointEncoding,
+    /// Entropy source configuration (FIPS mode only)
+    #[cfg(feature = "fips")]
+    #[serde(default)]
+    pub entropy_source: EntropySourceConfig,
     /// List of configured slots
     pub slots: Vec<Slot>,
 }
@@ -244,6 +325,8 @@ impl Config {
     pub fn new() -> Config {
         Config {
             ec_point_encoding: EcPointEncoding::default(),
+            #[cfg(feature = "fips")]
+            entropy_source: EntropySourceConfig::default(),
             slots: Vec::new(),
         }
     }
@@ -505,5 +588,158 @@ impl Config {
         }
         self.fix_slot_numbers();
         Ok(())
+    }
+}
+
+// ============================================================================
+// Tests for EntropySourceConfig
+// ============================================================================
+
+#[cfg(all(test, feature = "fips"))]
+mod entropy_config_tests {
+    use super::*;
+
+    #[test]
+    fn test_entropy_source_config_default() {
+        let config = EntropySourceConfig::default();
+        assert_eq!(config, EntropySourceConfig::Auto);
+    }
+
+    #[test]
+    fn test_entropy_source_config_serialize() {
+        // Test that all variants can be serialized/deserialized
+        let configs = vec![
+            ("auto", EntropySourceConfig::Auto),
+            ("getrandom", EntropySourceConfig::Getrandom),
+            ("jitterentropy", EntropySourceConfig::Jitterentropy),
+        ];
+
+        for (name, config) in configs {
+            let toml_str = format!("entropy_source = \"{}\"\nslots = []", name);
+            let parsed: Config = toml::from_str(&toml_str).unwrap();
+            assert_eq!(parsed.entropy_source, config, "Failed for {}", name);
+        }
+    }
+
+    #[test]
+    fn test_entropy_source_config_apply_getrandom() {
+        // Getrandom should always succeed
+        let config = EntropySourceConfig::Getrandom;
+        let result = config.apply();
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "getrandom");
+    }
+
+    #[cfg(feature = "jitterentropy")]
+    #[test]
+    fn test_entropy_source_config_apply_jitterentropy() {
+        // This test depends on jitterentropy being available on the system
+        let config = EntropySourceConfig::Jitterentropy;
+        let result = config.apply();
+        // May fail if jitterentropy not available on this system
+        match result {
+            Ok(name) => assert_eq!(name, "jitterentropy"),
+            Err(msg) => {
+                assert!(
+                    msg.contains("not available"),
+                    "Unexpected error: {}",
+                    msg
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "jitterentropy")]
+    #[test]
+    fn test_entropy_source_config_apply_auto() {
+        // Auto should always succeed (falls back appropriately)
+        let config = EntropySourceConfig::Auto;
+        let result = config.apply();
+        // On systems with jitterentropy available, should succeed
+        // On systems without, may fail with descriptive error
+        match result {
+            Ok(name) => {
+                // Valid names for auto mode
+                assert!(name == "getrandom" || name == "jitterentropy");
+            }
+            Err(msg) => {
+                // Should only fail if jitterentropy isn't available AND
+                // kernel isn't in FIPS mode
+                assert!(msg.contains("not available") || msg.contains("FIPS"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_config_with_entropy_source() {
+        let toml_str = r#"
+            entropy_source = "jitterentropy"
+            
+            [[slots]]
+            slot = 1
+            dbtype = "sqlite"
+            dbargs = "/tmp/test.sql"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.entropy_source, EntropySourceConfig::Jitterentropy);
+        assert_eq!(config.slots.len(), 1);
+    }
+
+    #[test]
+    fn test_config_entropy_source_default_when_missing() {
+        // When entropy_source is not specified, should default to Auto
+        let toml_str = r#"
+            [[slots]]
+            slot = 1
+            dbtype = "sqlite"
+            dbargs = "/tmp/test.sql"
+        "#;
+
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.entropy_source, EntropySourceConfig::Auto);
+    }
+
+    /// Test that requesting jitterentropy when the feature is disabled
+    /// returns an appropriate error.
+    #[cfg(not(feature = "jitterentropy"))]
+    #[test]
+    fn test_entropy_source_config_jitterentropy_not_available() {
+        let config = EntropySourceConfig::Jitterentropy;
+        let result = config.apply();
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("not enabled"),
+            "Expected 'not enabled' error, got: {}",
+            msg
+        );
+    }
+
+    /// Test auto mode when jitterentropy is NOT available and kernel is NOT
+    /// in FIPS mode - should return an error explaining the situation.
+    #[cfg(not(feature = "jitterentropy"))]
+    #[test]
+    fn test_entropy_source_config_auto_without_jitterentropy() {
+        let config = EntropySourceConfig::Auto;
+        let result = config.apply();
+
+        // Check if kernel is in FIPS mode
+        let kernel_fips = ossl::fips::is_kernel_fips_mode();
+
+        if kernel_fips {
+            // Should succeed with getrandom
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), "getrandom");
+        } else {
+            // Should fail with descriptive error
+            assert!(result.is_err());
+            let msg = result.unwrap_err();
+            assert!(
+                msg.contains("FIPS") || msg.contains("jitterentropy"),
+                "Expected FIPS-related error, got: {}",
+                msg
+            );
+        }
     }
 }
