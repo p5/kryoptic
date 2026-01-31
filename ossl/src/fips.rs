@@ -39,6 +39,63 @@ fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
     guard.get_entropy(buf)
 }
 
+/// Configure the entropy source to use for FIPS operations.
+///
+/// This function MUST be called before any FIPS operations are performed,
+/// ideally at application startup.
+pub fn set_entropy_source(source: Box<dyn EntropySource>) {
+    let mut guard = ENTROPY_SOURCE
+        .write()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned");
+    *guard = source;
+}
+
+/// Get the name of the currently configured entropy source.
+pub fn entropy_source_name() -> &'static str {
+    let guard = ENTROPY_SOURCE
+        .read()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned");
+    guard.name()
+}
+
+/// Configure entropy source to use only the kernel's getrandom().
+/// This is the default and is only FIPS-approved when the kernel
+/// is in FIPS mode.
+pub fn use_getrandom_entropy() {
+    set_entropy_source(Box::new(GetrandomSource::new()));
+}
+
+/// Configure entropy source to use only jitterentropy.
+/// This is FIPS-approved on any system (SP800-90B compliant).
+#[cfg(feature = "jitterentropy")]
+pub fn use_jitterentropy_entropy() -> Result<(), Error> {
+    use crate::entropy::jitterentropy::JitterentropySource;
+    let source = JitterentropySource::new_fips()?;
+    set_entropy_source(Box::new(source));
+    Ok(())
+}
+
+/// Check if the Linux kernel is running in FIPS mode.
+pub fn is_kernel_fips_mode() -> bool {
+    std::fs::read_to_string("/proc/sys/crypto/fips_enabled")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Automatically configure the best FIPS-compliant entropy source.
+///
+/// Uses getrandom if kernel is in FIPS mode, otherwise uses jitterentropy.
+#[cfg(feature = "jitterentropy")]
+pub fn use_fips_compliant_entropy() -> Result<&'static str, Error> {
+    if is_kernel_fips_mode() {
+        use_getrandom_entropy();
+        Ok("getrandom")
+    } else {
+        use_jitterentropy_entropy()?;
+        Ok("jitterentropy")
+    }
+}
+
 /* Entropy Stuff */
 unsafe extern "C" fn fips_get_entropy(
     _handle: *const OSSL_CORE_HANDLE,
@@ -1208,4 +1265,62 @@ pub(crate) fn pkey_type_name(pkey: *const EVP_PKEY) -> *const c_char {
         return null();
     }
     return unsafe { (*keymgmt).type_name };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entropy::GetrandomSource;
+    use serial_test::serial;
+
+    #[test]
+    fn test_entropy_source_name() {
+        let name = entropy_source_name();
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_is_kernel_fips_mode() {
+        let _fips_mode = is_kernel_fips_mode();
+    }
+
+    #[test]
+    #[serial]
+    fn test_use_getrandom_entropy() {
+        use_getrandom_entropy();
+        assert_eq!(entropy_source_name(), "getrandom");
+    }
+
+    #[test]
+    #[serial]
+    fn test_set_entropy_source() {
+        set_entropy_source(Box::new(GetrandomSource::new()));
+        let mut buf = [0u8; 64];
+        let result = get_entropy_internal(&mut buf);
+        assert!(result.is_ok());
+        use_getrandom_entropy();
+    }
+
+    #[cfg(feature = "jitterentropy")]
+    mod jitterentropy_tests {
+        use super::*;
+
+        #[test]
+        #[serial]
+        fn test_use_jitterentropy_entropy() {
+            if use_jitterentropy_entropy().is_ok() {
+                assert_eq!(entropy_source_name(), "jitterentropy");
+                use_getrandom_entropy();
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn test_use_fips_compliant_entropy() {
+            if let Ok(name) = use_fips_compliant_entropy() {
+                assert!(name == "getrandom" || name == "jitterentropy");
+                use_getrandom_entropy();
+            }
+        }
+    }
 }
