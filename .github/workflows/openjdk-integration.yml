@@ -4,6 +4,7 @@ name: OpenJDK Integration Tests
 
 env:
   OPENSSL_BRANCH: kryoptic_ossl40
+  JITTERENTROPY_VERSION: v3.6.0
   # Keep jtreg_version, openjdk_feature, and openjdk_name in sync with
   # testdata/openjdk/jtreg-kryoptic.sh.
   jtreg_version: 8+2
@@ -40,6 +41,14 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v6
 
+      - name: Setup Jitterentropy sources
+        run: |
+          git config --global --add safe.directory /__w/kryoptic
+          cd ..
+          git clone https://github.com/smuellerDD/jitterentropy-library.git \
+                    --single-branch --branch $JITTERENTROPY_VERSION jitterentropy
+          echo "KRYOPTIC_JITTERENTROPY_SOURCES=$PWD/jitterentropy" >> "$GITHUB_ENV"
+
       - name: Setup OpenSSL
         id: ossl-setup
         run: |
@@ -74,7 +83,9 @@ jobs:
         run: cargo generate-lockfile
 
       - name: Build Kryoptic
-        run: make fips && ./misc/hmacify.sh target/debug/libkryoptic_pkcs11.so
+        run: |
+          cargo build --no-default-features --features fips,nssdb,jitterentropy
+          ./misc/hmacify.sh target/debug/libkryoptic_pkcs11.so
 
       # OpenJDK steps.
       - name: Get container OpenJDK version
