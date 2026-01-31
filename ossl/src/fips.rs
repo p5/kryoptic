@@ -14,15 +14,155 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::slice;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLock};
 
 use crate::bindings::*;
+use crate::entropy::{EntropySource, GetrandomSource};
 use crate::pkey::EvpPkey;
 use crate::signature::SigAlg;
 use crate::{cstr, Error, ErrorKind, OsslContext};
 
-use getrandom;
 use libc;
+
+/* Entropy Source Configuration */
+
+/// The global entropy source used by the FIPS provider.
+/// This can be configured at startup before FIPS initialization.
+static ENTROPY_SOURCE: LazyLock<RwLock<Box<dyn EntropySource>>> =
+    LazyLock::new(|| RwLock::new(Box::new(GetrandomSource::new())));
+
+/// Configure the entropy source to use for FIPS operations.
+///
+/// This function MUST be called before any FIPS operations are performed,
+/// ideally at application startup. Once the FIPS provider is initialized,
+/// changing the entropy source may not take effect for existing contexts.
+///
+/// # Arguments
+///
+/// * `source` - The entropy source to use
+///
+/// # Example
+///
+/// ```ignore
+/// use ossl::entropy::{GetrandomSource, JitterentropySource};
+/// use ossl::fips::set_entropy_source;
+///
+/// // Use jitterentropy for FIPS compliance on non-FIPS kernels
+/// let jent = JitterentropySource::new_fips().unwrap();
+/// set_entropy_source(Box::new(jent));
+/// ```
+///
+/// # Panics
+///
+/// Panics if the entropy source lock is poisoned (indicates a prior panic
+/// during entropy operations, which is a critical failure for FIPS).
+pub fn set_entropy_source(source: Box<dyn EntropySource>) {
+    let mut guard = ENTROPY_SOURCE
+        .write()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned - prior panic during entropy operation");
+    *guard = source;
+}
+
+/// Get the name of the currently configured entropy source.
+///
+/// # Panics
+///
+/// Panics if the entropy source lock is poisoned (indicates a prior panic
+/// during entropy operations, which is a critical failure for FIPS).
+pub fn entropy_source_name() -> &'static str {
+    let guard = ENTROPY_SOURCE
+        .read()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned - prior panic during entropy operation");
+    guard.name()
+}
+
+/// Configure entropy source to use only the kernel's getrandom().
+/// This is the default and is only FIPS-approved when the kernel
+/// is in FIPS mode.
+pub fn use_getrandom_entropy() {
+    set_entropy_source(Box::new(GetrandomSource::new()));
+}
+
+/// Configure entropy source to use only jitterentropy.
+/// This is FIPS-approved on any system (SP800-90B compliant).
+/// Requires the `jitterentropy` feature.
+///
+/// # Returns
+/// - `Ok(())` if jitterentropy is available and configured
+/// - `Err(Error)` if jitterentropy is not available on this system
+#[cfg(feature = "jitterentropy")]
+pub fn use_jitterentropy_entropy() -> Result<(), Error> {
+    use crate::entropy::jitterentropy::JitterentropySource;
+    let source = JitterentropySource::new_fips()?;
+    set_entropy_source(Box::new(source));
+    Ok(())
+}
+
+/// Check if the Linux kernel is running in FIPS mode.
+///
+/// Returns `true` if `/proc/sys/crypto/fips_enabled` contains "1".
+/// Returns `false` if FIPS mode is disabled or the file cannot be read.
+pub fn is_kernel_fips_mode() -> bool {
+    std::fs::read_to_string("/proc/sys/crypto/fips_enabled")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+}
+
+/// Automatically configure the best FIPS-compliant entropy source.
+///
+/// This function detects the system's FIPS status and configures the
+/// appropriate entropy source:
+///
+/// - **Kernel FIPS mode enabled**: Uses `getrandom` (kernel provides FIPS entropy)
+/// - **Kernel FIPS mode disabled**: Uses `jitterentropy` (SP800-90B compliant)
+///
+/// This is the recommended way to configure entropy for FIPS compliance
+/// when you don't know the target system's configuration.
+///
+/// Requires the `jitterentropy` feature.
+///
+/// # Returns
+/// - `Ok(source_name)` with the name of the configured source
+/// - `Err(Error)` if jitterentropy is needed but not available
+#[cfg(feature = "jitterentropy")]
+pub fn use_fips_compliant_entropy() -> Result<&'static str, Error> {
+    if is_kernel_fips_mode() {
+        // Kernel FIPS mode - getrandom is FIPS-approved
+        use_getrandom_entropy();
+        Ok("getrandom")
+    } else {
+        // Non-FIPS kernel - use jitterentropy for FIPS compliance
+        use_jitterentropy_entropy()?;
+        Ok("jitterentropy")
+    }
+}
+
+/// Internal function to get entropy using the configured source.
+///
+/// # Panics
+///
+/// Panics if the entropy source lock is poisoned (indicates a prior panic
+/// during entropy operations, which is a critical failure for FIPS).
+fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
+    let guard = ENTROPY_SOURCE
+        .read()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned - prior panic during entropy operation");
+    guard.get_entropy(buf)
+}
+
+/// Internal function to get a nonce using the configured source.
+///
+/// # Panics
+///
+/// Panics if the entropy source lock is poisoned (indicates a prior panic
+/// during entropy operations, which is a critical failure for FIPS).
+#[cfg_attr(not(test), allow(dead_code))]
+fn get_nonce_internal(buf: &mut [u8], salt: Option<&[u8]>) -> Result<usize, Error> {
+    let guard = ENTROPY_SOURCE
+        .read()
+        .expect("FIPS CRITICAL: Entropy source lock poisoned - prior panic during entropy operation");
+    guard.get_nonce(buf, salt)
+}
 
 /* Entropy Stuff */
 unsafe extern "C" fn fips_get_entropy(
@@ -50,7 +190,7 @@ unsafe extern "C" fn fips_get_entropy(
         return 0;
     }
     let r = unsafe { slice::from_raw_parts_mut(out as *mut u8, len) };
-    if getrandom::fill(r).is_err() {
+    if get_entropy_internal(r).is_err() {
         unsafe { fips_clear_free(out, len, null(), 0) };
         return 0;
     }
@@ -112,7 +252,7 @@ unsafe extern "C" fn fips_get_nonce(
         }
     }
 
-    return out;
+    out
 }
 
 #[cfg(feature = "dummy-integrity")]
@@ -1193,4 +1333,148 @@ pub(crate) fn pkey_type_name(pkey: *const EVP_PKEY) -> *const c_char {
         return null();
     }
     return unsafe { (*keymgmt).type_name };
+}
+
+// ============================================================================
+// Tests for FIPS entropy integration
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entropy::GetrandomSource;
+
+    #[test]
+    fn test_entropy_source_name_default() {
+        // Default should be getrandom
+        let name = entropy_source_name();
+        // Note: This may not be "getrandom" if another test changed it,
+        // but it should be a valid name
+        assert!(!name.is_empty());
+    }
+
+    #[test]
+    fn test_get_entropy_internal() {
+        let mut buf = [0u8; 32];
+        let result = get_entropy_internal(&mut buf);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 32);
+        // Should have some non-zero bytes
+        assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_get_nonce_internal() {
+        let mut buf = [0u8; 32];
+        let salt = b"test salt";
+        let result = get_nonce_internal(&mut buf, Some(salt));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 32);
+    }
+
+    #[test]
+    fn test_get_nonce_internal_no_salt() {
+        let mut buf = [0u8; 32];
+        let result = get_nonce_internal(&mut buf, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 32);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_set_entropy_source_custom() {
+        // Test setting a custom entropy source
+        set_entropy_source(Box::new(GetrandomSource::new()));
+        
+        // Verify we can still get entropy
+        let mut buf = [0u8; 64];
+        let result = get_entropy_internal(&mut buf);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 64);
+        
+        // Reset to default
+        set_entropy_source(Box::new(GetrandomSource::new()));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_entropy_concurrent_access() {
+        use std::thread;
+
+        let mut handles = vec![];
+
+        // Spawn multiple threads accessing the global entropy source
+        for _ in 0..4 {
+            let handle = thread::spawn(move || {
+                for _ in 0..10 {
+                    let mut buf = [0u8; 32];
+                    let result = get_entropy_internal(&mut buf);
+                    assert!(result.is_ok());
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+    }
+
+    #[cfg(feature = "jitterentropy")]
+    mod jitterentropy_fips_tests {
+        use super::*;
+        use crate::entropy::jitterentropy::JitterentropySource;
+        use serial_test::serial;
+
+        #[test]
+        #[serial]
+        fn test_set_jitterentropy_source() {
+            // Try to create jitterentropy source
+            match JitterentropySource::new_fips() {
+                Ok(jent) => {
+                    set_entropy_source(Box::new(jent));
+                    
+                    // Verify name changed
+                    let name = entropy_source_name();
+                    assert_eq!(name, "jitterentropy");
+                    
+                    // Verify we can get entropy
+                    let mut buf = [0u8; 32];
+                    let result = get_entropy_internal(&mut buf);
+                    assert!(result.is_ok());
+                    
+                    // Reset to default
+                    set_entropy_source(Box::new(GetrandomSource::new()));
+                }
+                Err(_) => {
+                    println!("Jitterentropy not available, skipping test");
+                }
+            }
+        }
+
+        #[test]
+        #[serial]
+        fn test_fips_entropy_large_request() {
+            // Test large entropy requests typical in FIPS DRBG seeding
+            match JitterentropySource::new_fips() {
+                Ok(jent) => {
+                    set_entropy_source(Box::new(jent));
+                    
+                    // DRBG typically needs 32-48 bytes of entropy
+                    for size in [32, 48, 64, 128] {
+                        let mut buf = vec![0u8; size];
+                        let result = get_entropy_internal(&mut buf);
+                        assert!(result.is_ok(), "Failed for size {}", size);
+                        assert_eq!(result.unwrap(), size);
+                    }
+                    
+                    // Reset to default
+                    set_entropy_source(Box::new(GetrandomSource::new()));
+                }
+                Err(_) => {
+                    println!("Jitterentropy not available, skipping test");
+                }
+            }
+        }
+    }
 }

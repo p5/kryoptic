@@ -127,3 +127,6 @@ pqc = ["mlkem", "mldsa", "slhdsa"]
 minimal = ["sqlitedb", "aes", "ecc_min", "hash_all", "rsa"]
 
 ossl400 = ["ossl/ossl400"]
+
+# Entropy sources
+jitterentropy = ["ossl/jitterentropy"] # Enable jitterentropy-based entropy source
