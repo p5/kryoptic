@@ -287,6 +287,152 @@ fn use_system_ossl(out_file: &Path) {
     ossl_bindings(&mut args, out_file);
 }
 
+/// Use the system-installed jitterentropy library (for dynamic builds).
+///
+/// Links to libjitterentropy.so from the system package.
+#[cfg(feature = "jitterentropy")]
+fn use_system_jitterentropy() {
+    // Try to find the system library
+    // jitterentropy doesn't provide pkg-config, so we check directly
+    let lib_paths = [
+        "/usr/lib64",
+        "/usr/lib",
+        "/usr/local/lib64",
+        "/usr/local/lib",
+    ];
+
+    let header_paths = [
+        "/usr/include",
+        "/usr/local/include",
+    ];
+
+    let mut lib_found = false;
+    let mut header_found = false;
+
+    for path in &lib_paths {
+        let lib_path = std::path::Path::new(path).join("libjitterentropy.so");
+        if lib_path.exists() {
+            println!("cargo:rustc-link-search=native={}", path);
+            lib_found = true;
+            break;
+        }
+    }
+
+    for path in &header_paths {
+        let header_path = std::path::Path::new(path).join("jitterentropy.h");
+        if header_path.exists() {
+            header_found = true;
+            break;
+        }
+    }
+
+    if !lib_found {
+        panic!(
+            "System jitterentropy library not found. \
+             Install the jitterentropy-devel package or use FIPS mode \
+             to compile from source."
+        );
+    }
+
+    if !header_found {
+        panic!(
+            "System jitterentropy headers not found. \
+             Install the jitterentropy-devel package."
+        );
+    }
+
+    // Link dynamically to the system library
+    println!("cargo:rustc-link-lib=jitterentropy");
+
+    // pthread is still needed for the internal timer
+    println!("cargo:rustc-link-lib=pthread");
+}
+
+/// Build the jitterentropy library from source (for FIPS builds).
+///
+/// IMPORTANT: Jitterentropy MUST be compiled with -O0 (no optimization)
+/// to preserve the timing jitter that provides entropy.
+#[cfg(feature = "jitterentropy")]
+fn build_jitterentropy_from_source() {
+    // Jitterentropy sources must be provided via environment variable,
+    // consistent with how OpenSSL sources are handled for FIPS builds.
+    let jent_path = std::env::var("KRYOPTIC_JITTERENTROPY_SOURCES")
+        .map(std::path::PathBuf::from)
+        .expect(
+            "Env var KRYOPTIC_JITTERENTROPY_SOURCES is not defined. \
+             Set it to the path of the jitterentropy-library source directory. \
+             Example: export KRYOPTIC_JITTERENTROPY_SOURCES=/path/to/jitterentropy-library"
+        );
+
+    if !jent_path.exists() {
+        panic!(
+            "Jitterentropy sources not found at {:?}. \
+             Verify KRYOPTIC_JITTERENTROPY_SOURCES points to a valid directory.",
+            jent_path
+        );
+    }
+
+    let jent_path = jent_path
+        .canonicalize()
+        .expect("Cannot canonicalize jitterentropy path");
+
+    println!("cargo:rerun-if-changed={}", jent_path.display());
+
+    // Source files for jitterentropy library
+    let source_files = [
+        "src/jitterentropy-base.c",
+        "src/jitterentropy-gcd.c",
+        "src/jitterentropy-health.c",
+        "src/jitterentropy-noise.c",
+        "src/jitterentropy-sha3.c",
+        "src/jitterentropy-timer.c",
+    ];
+
+    let mut build = cc::Build::new();
+
+    // Add source files
+    for src in &source_files {
+        let src_path = jent_path.join(src);
+        if !src_path.exists() {
+            panic!("Jitterentropy source file not found: {:?}", src_path);
+        }
+        build.file(&src_path);
+        println!("cargo:rerun-if-changed={}", src_path.display());
+    }
+
+    // Include paths
+    build.include(&jent_path);
+    build.include(jent_path.join("src"));
+
+    // CRITICAL FOR FIPS: Compile with -O0 to preserve timing jitter
+    // The jitterentropy library's entropy quality depends on CPU timing
+    // variations that compiler optimizations would eliminate.
+    //
+    // We use multiple methods to ensure -O0 is applied:
+    // 1. opt_level(0) - cc crate's optimization level
+    // 2. Explicit -O0 flag - overrides any inherited flags
+    // 3. force_frame_pointer - prevents frame pointer omission optimization
+    build.opt_level(0);
+    build.flag("-O0");
+    build.flag("-fno-omit-frame-pointer");
+    
+    // Prevent strict aliasing optimizations that could affect timing
+    build.flag("-fno-strict-aliasing");
+
+    // Enable internal timer support for systems without high-res timers
+    build.define("JENT_CONF_ENABLE_INTERNAL_TIMER", None);
+
+    // Disable warnings that the library triggers
+    build.flag("-Wno-unused-parameter");
+    build.flag("-Wno-sign-compare");
+
+    // Build as a static library
+    build.compile("jitterentropy");
+
+    // Link pthread for internal timer support
+    println!("cargo:rustc-link-lib=pthread");
+}
+
 fn set_pretty_panic() {
     set_hook(Box::new(|panic_info| {
         if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -325,6 +471,18 @@ fn main() {
         use_system_ossl(&ossl_bindings);
     } else {
         build_ossl(&ossl_bindings);
+    }
+
+    /* Jitterentropy library */
+    #[cfg(feature = "jitterentropy")]
+    {
+        if cfg!(feature = "dynamic") {
+            // Dynamic builds: link to system libjitterentropy.so
+            use_system_jitterentropy();
+        } else {
+            // FIPS builds: compile from source for reproducibility
+            build_jitterentropy_from_source();
+        }
     }
 
     println!("cargo:rerun-if-changed=build.rs");
