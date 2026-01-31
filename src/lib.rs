@@ -545,6 +545,19 @@ extern "C" fn fn_initialize(_init_args: CK_VOID_PTR) -> CK_RV {
     if wstate.is_initialized() {
         ret = CKR_CRYPTOKI_ALREADY_INITIALIZED;
     } else {
+        #[cfg(feature = "fips")]
+        {
+            match gconf.conf.entropy_source.apply() {
+                Ok(_name) => {
+                    #[cfg(feature = "log")]
+                    log::info!("Configured entropy source: {}", _name);
+                }
+                Err(_msg) => {
+                    #[cfg(feature = "log")]
+                    log::warn!("Entropy source configuration: {}", _msg);
+                }
+            }
+        }
         wstate.initialize();
     }
 
