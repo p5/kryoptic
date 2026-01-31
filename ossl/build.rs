@@ -388,8 +388,82 @@ fn build_jitterentropy_from_source() {
         "src/jitterentropy-timer.c",
     ];
 
+    // CRITICAL: Remove ALL C/C++ build flags from the environment.
+    // Jitterentropy's entropy quality depends on precise timing characteristics
+    // that can be destroyed by optimization flags (e.g., -O2, -O3) that may be
+    // present in environment variables set by the caller (e.g., RPM %{optflags}).
+    // We must have complete control over the compilation flags.
+    //
+    // Save and remove these environment variables to prevent the cc crate
+    // from inheriting any flags that could affect optimization.
+    let env_vars_to_clear = [
+        // Standard C/C++ flags
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        // RPM-specific variables
+        "RPM_OPT_FLAGS",
+        "RPM_LD_FLAGS",
+        "RPM_BUILD_ROOT",
+        // Cargo/cc crate variables
+        "DEBUG",
+        "OPT_LEVEL",
+        "TARGET_CFLAGS",
+        "TARGET_CXXFLAGS",
+        "TARGET_CPPFLAGS",
+        "HOST_CFLAGS",
+        "HOST_CXXFLAGS",
+        "HOST_CPPFLAGS",
+        // Architecture-specific variants (cc crate checks these)
+        "CFLAGS_x86_64-unknown-linux-gnu",
+        "CFLAGS_x86_64_unknown_linux_gnu",
+        "CFLAGS_aarch64-unknown-linux-gnu",
+        "CFLAGS_aarch64_unknown_linux_gnu",
+        // Generic target variables
+        "CC_FLAGS",
+        "CXX_FLAGS",
+    ];
+    
+    // Also clear any target-specific CFLAGS that cc might pick up
+    let target = env::var("TARGET").unwrap_or_default();
+    let target_underscore = target.replace('-', "_");
+    let target_specific_vars = [
+        format!("CFLAGS_{}", target),
+        format!("CFLAGS_{}", target_underscore),
+        format!("CXXFLAGS_{}", target),
+        format!("CXXFLAGS_{}", target_underscore),
+        format!("CPPFLAGS_{}", target),
+        format!("CPPFLAGS_{}", target_underscore),
+    ];
+    
+    // Save all env vars before clearing
+    let mut saved_env: Vec<(String, Option<String>)> = env_vars_to_clear
+        .iter()
+        .map(|var| (var.to_string(), env::var(var).ok()))
+        .collect();
+    
+    for var in &target_specific_vars {
+        saved_env.push((var.clone(), env::var(var).ok()));
+    }
+    
+    // Clear all the variables
+    // SAFETY: We are in a build script which is single-threaded at this point,
+    // and we restore the variables after the jitterentropy build completes.
+    for var in &env_vars_to_clear {
+        unsafe { env::remove_var(var) };
+    }
+    for var in &target_specific_vars {
+        unsafe { env::remove_var(var) };
+    }
+    
     let mut build = cc::Build::new();
 
+    // Disable cargo's automatic debug and optimization settings
+    // so we have full control over the flags
+    build.debug(false);
+    build.opt_level(0);
+    
     // Add source files
     for src in &source_files {
         let src_path = jent_path.join(src);
@@ -404,30 +478,26 @@ fn build_jitterentropy_from_source() {
     build.include(&jent_path);
     build.include(jent_path.join("src"));
 
-    // CRITICAL FOR FIPS: Compile with -O0 to preserve timing jitter
+    // CRITICAL FOR FIPS: Compile with -O0 to preserve timing jitter.
     // The jitterentropy library's entropy quality depends on CPU timing
     // variations that compiler optimizations would eliminate.
-    //
-    // We use multiple methods to ensure -O0 is applied:
-    // 1. opt_level(0) - cc crate's optimization level
-    // 2. Explicit -O0 flag - overrides any inherited flags
-    // 3. force_frame_pointer - prevents frame pointer omission optimization
-    build.opt_level(0);
-    build.flag("-O0");
-    build.flag("-fno-omit-frame-pointer");
-    
-    // Prevent strict aliasing optimizations that could affect timing
-    build.flag("-fno-strict-aliasing");
+    // Environment variables are cleared above to prevent any inherited
+    // optimization flags from affecting the build.
+    build.force_frame_pointer(true);
 
     // Enable internal timer support for systems without high-res timers
     build.define("JENT_CONF_ENABLE_INTERNAL_TIMER", None);
 
-    // Disable warnings that the library triggers
-    build.flag("-Wno-unused-parameter");
-    build.flag("-Wno-sign-compare");
-
     // Build as a static library
     build.compile("jitterentropy");
+
+    // Restore the saved environment variables
+    // SAFETY: We are in a build script which is single-threaded at this point.
+    for (var, value) in saved_env {
+        if let Some(v) = value {
+            unsafe { env::set_var(&var, v) };
+        }
+    }
 
     // Link pthread for internal timer support
     println!("cargo:rustc-link-lib=pthread");
