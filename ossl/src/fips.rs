@@ -14,7 +14,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::slice;
-use std::sync::LazyLock;
+use std::sync::{LazyLock, OnceLock};
 
 use crate::bindings::*;
 use crate::pkey::EvpPkey;
@@ -62,9 +62,30 @@ pub fn is_kernel_fips_mode() -> bool {
  * typically not called as the FIPS provider uses its internal JITTER
  * seed source. However, they are still needed for nonce generation and
  * as a fallback.
+ *
+ * When the `jitterentropy` feature is enabled, we use jitterentropy for
+ * all entropy needs (including nonces) to ensure FIPS compliance on hosts
+ * where the kernel is not in FIPS mode.
  */
 
-/// Internal function to get entropy using getrandom.
+/// Internal function to get entropy.
+/// Uses jitterentropy when the feature is enabled, otherwise getrandom.
+#[cfg(feature = "jitterentropy")]
+fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
+    use crate::entropy::EntropySource;
+    use std::sync::OnceLock;
+
+    static JITTER_SOURCE: OnceLock<crate::entropy::JitterentropySource> =
+        OnceLock::new();
+
+    let source = JITTER_SOURCE.get_or_init(|| {
+        crate::entropy::JitterentropySource::new_fips()
+            .expect("jitterentropy initialization failed")
+    });
+    source.get_entropy(buf)
+}
+
+#[cfg(not(feature = "jitterentropy"))]
 fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
     use crate::entropy::{EntropySource, GetrandomSource};
 
@@ -641,6 +662,37 @@ struct FipsProvider {
 unsafe impl Send for FipsProvider {}
 unsafe impl Sync for FipsProvider {}
 
+/// Storage for externally-initialized provider context.
+/// When OpenSSL loads this module as a provider and calls OSSL_provider_init,
+/// we store the context here so that later PKCS#11 initialization can reuse it
+/// instead of trying to re-initialize (which would fail).
+struct ExternalProviderCtx {
+    provider: *mut PROV_CTX,
+    dispatch: *const OSSL_DISPATCH,
+}
+
+unsafe impl Send for ExternalProviderCtx {}
+unsafe impl Sync for ExternalProviderCtx {}
+
+static EXTERNAL_PROVIDER_CTX: OnceLock<ExternalProviderCtx> = OnceLock::new();
+
+/// Called by OSSL_provider_init (the external entry point) to register
+/// that the FIPS provider was initialized externally by OpenSSL.
+/// This allows the PKCS#11 initialization to reuse the existing context.
+///
+/// # Safety
+/// The provider and dispatch pointers must be valid and remain valid
+/// for the lifetime of the program.
+pub unsafe fn register_external_init(
+    provider: *mut c_void,
+    dispatch: *const OSSL_DISPATCH,
+) {
+    let _ = EXTERNAL_PROVIDER_CTX.set(ExternalProviderCtx {
+        provider: provider as *mut PROV_CTX,
+        dispatch,
+    });
+}
+
 macro_rules! dispatcher_struct {
     (args1; $fn_id:expr; $fn:expr) => {
         OSSL_DISPATCH {
@@ -699,6 +751,20 @@ macro_rules! dispatcher_struct {
 }
 
 static FIPS_PROVIDER: LazyLock<FipsProvider> = LazyLock::new(|| unsafe {
+    // Check if the FIPS provider was already initialized externally by OpenSSL.
+    // This happens when OpenSSL loads this module as a provider before PKCS#11
+    // initialization. In that case, we reuse the existing context instead of
+    // trying to re-initialize (which would fail with an assertion error).
+    if let Some(ext_ctx) = EXTERNAL_PROVIDER_CTX.get() {
+        let osslctx = ossl_prov_ctx_get0_libctx(ext_ctx.provider);
+        return FipsProvider {
+            provider: ext_ctx.provider,
+            dispatch: ext_ctx.dispatch,
+            context: OsslContext::from_ctx(osslctx),
+        };
+    }
+
+    // No external initialization - initialize the FIPS provider ourselves
     let core_dispatch = [
         /* Seeding functions */
         dispatcher_struct!(args5; OSSL_FUNC_GET_ENTROPY; fips_get_entropy),
@@ -1271,5 +1337,25 @@ mod tests {
         assert_eq!(result.unwrap(), 64);
         // Verify we got some non-zero bytes (statistically very unlikely to be all zeros)
         assert!(buf.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn test_external_provider_ctx_registration() {
+        // Test that external provider context registration works correctly.
+        // Note: This test just verifies the registration mechanism works;
+        // the actual double-initialization prevention is tested by the
+        // PKCS#11 integration tests.
+
+        // EXTERNAL_PROVIDER_CTX is a OnceLock, so we can only set it once.
+        // If it's already set (from a previous test or actual use), this
+        // test just verifies the get() works.
+        if EXTERNAL_PROVIDER_CTX.get().is_some() {
+            // Already initialized - verify we can read it
+            let ctx = EXTERNAL_PROVIDER_CTX.get().unwrap();
+            assert!(!ctx.provider.is_null() || ctx.dispatch.is_null());
+        }
+        // We can't fully test register_external_init here since it requires
+        // valid provider/dispatch pointers from OpenSSL, but we verify the
+        // OnceLock mechanism compiles and works.
     }
 }

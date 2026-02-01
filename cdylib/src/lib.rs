@@ -41,7 +41,11 @@ pub extern "C" fn C_GetInterfaceList(
 /// Implementation of the OpenSSL provider initialization function
 ///
 /// This function allows OpenSSL to use this module as an OpenSSL FIPS
-/// provider
+/// provider.
+///
+/// When called, we register the provider context so that later PKCS#11
+/// initialization can reuse it instead of trying to re-initialize the
+/// FIPS provider (which would fail).
 
 #[cfg(feature = "fips")]
 #[unsafe(no_mangle)]
@@ -52,6 +56,13 @@ pub extern "C" fn OSSL_provider_init(
     provctx: *mut *mut ::std::ffi::c_void,
 ) -> ::std::ffi::c_int {
     unsafe {
-        ::ossl::bindings::OSSL_provider_init_int(handle, in_, out, provctx)
+        let ret =
+            ::ossl::bindings::OSSL_provider_init_int(handle, in_, out, provctx);
+        if ret == 1 {
+            // Register that we were initialized externally by OpenSSL.
+            // This allows PKCS#11 initialization to reuse this context.
+            ::ossl::fips::register_external_init(*provctx, *out);
+        }
+        ret
     }
 }

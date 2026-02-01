@@ -11,6 +11,11 @@ use crate::{
     cstr, trace_ossl, Error, ErrorKind, OsslContext, OsslParamBuilder,
 };
 
+#[cfg(feature = "jitterentropy")]
+use crate::entropy::{EntropySource, JitterentropySource};
+#[cfg(feature = "jitterentropy")]
+use std::sync::OnceLock;
+
 #[derive(Clone, Debug)]
 pub enum EvpRandGetParam {
     /// OSSL_DRBG_PARAM_DIGEST
@@ -103,6 +108,42 @@ impl EvpRandCtx {
             trace_ossl!("EVP_RAND_instantiate()");
             return Err(Error::new(ErrorKind::OsslError));
         }
+
+        // When jitterentropy is enabled, immediately reseed the DRBG with
+        // entropy from jitterentropy to ensure all random generation is based
+        // on the SP800-90B compliant entropy source, not getrandom().
+        #[cfg(feature = "jitterentropy")]
+        {
+            static JITTER_SOURCE: OnceLock<JitterentropySource> = OnceLock::new();
+
+            let source = JITTER_SOURCE.get_or_init(|| {
+                JitterentropySource::new_fips()
+                    .expect("jitterentropy initialization failed")
+            });
+
+            // Get entropy for reseeding (256 bits = 32 bytes for security strength)
+            let mut entropy = [0u8; 32];
+            source
+                .get_entropy(&mut entropy)
+                .map_err(|_| Error::new(ErrorKind::OsslError))?;
+
+            // Reseed the DRBG with jitterentropy-sourced entropy
+            let ret = unsafe {
+                EVP_RAND_reseed(
+                    randctx.ptr,
+                    1,
+                    entropy.as_ptr(),
+                    entropy.len(),
+                    std::ptr::null(),
+                    0,
+                )
+            };
+            if ret != 1 {
+                trace_ossl!("EVP_RAND_reseed() with jitterentropy");
+                return Err(Error::new(ErrorKind::OsslError));
+            }
+        }
+
         Ok(randctx)
     }
 
