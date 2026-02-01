@@ -545,6 +545,14 @@ extern "C" fn fn_initialize(_init_args: CK_VOID_PTR) -> CK_RV {
     if wstate.is_initialized() {
         ret = CKR_CRYPTOKI_ALREADY_INITIALIZED;
     } else {
+        #[cfg(feature = "fips")]
+        {
+            #[cfg(feature = "log")]
+            log::info!(
+                "FIPS entropy source: {}",
+                ossl::fips::entropy_source_name()
+            );
+        }
         wstate.initialize();
     }
 

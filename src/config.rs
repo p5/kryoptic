@@ -202,11 +202,19 @@ impl Default for EcPointEncoding {
     }
 }
 
+/* Entropy source is now a compile-time decision:
+ * - With `jitterentropy` feature: uses jitterentropy (SP800-90B compliant)
+ * - Without `jitterentropy` feature: uses getrandom()
+ *
+ * The entropy source can be queried at runtime via ossl::fips::entropy_source_name()
+ */
+
 /// Add tweaks for behavior in FIPS mode.
 #[cfg(feature = "fips")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FipsBehavior {
     /// Changes behavior of token in slot to always enforce keys to be private
+    #[serde(default)]
     pub keys_always_sensitive: bool,
 }
 
@@ -218,6 +226,8 @@ impl Default for FipsBehavior {
         }
     }
 }
+
+
 
 /// Main configuration structure
 ///
@@ -507,3 +517,5 @@ impl Config {
         Ok(())
     }
 }
+
+

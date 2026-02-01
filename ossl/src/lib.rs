@@ -27,6 +27,7 @@ pub mod asymcipher;
 pub mod cipher;
 pub mod derive;
 pub mod digest;
+pub mod entropy;
 pub mod mac;
 pub mod pkey;
 pub mod rand;
