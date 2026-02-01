@@ -14,65 +14,38 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 use std::slice;
-use std::sync::{LazyLock, RwLock};
+use std::sync::LazyLock;
 
 use crate::bindings::*;
-use crate::entropy::{EntropySource, GetrandomSource};
 use crate::pkey::EvpPkey;
 use crate::signature::SigAlg;
 use crate::{cstr, Error, ErrorKind, OsslContext};
 
 use libc;
 
-/* Entropy Source Configuration */
+/* Entropy Source - Compile-time selection
+ *
+ * When built with the `jitterentropy` feature, OpenSSL's FIPS provider
+ * is compiled with `enable-fips-jitter` which makes it use jitterentropy
+ * directly for DRBG seeding.
+ *
+ * When built without `jitterentropy`, the FIPS provider uses getrandom()
+ * via the standard entropy callbacks.
+ *
+ * This is a compile-time decision - there is no runtime configuration.
+ */
 
-/// The global entropy source used by the FIPS provider.
-/// This can be configured at startup before FIPS initialization.
-static ENTROPY_SOURCE: LazyLock<RwLock<Box<dyn EntropySource>>> =
-    LazyLock::new(|| RwLock::new(Box::new(GetrandomSource::new())));
-
-/// Internal function to get entropy using the configured source.
-fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
-    let guard = ENTROPY_SOURCE
-        .read()
-        .expect("FIPS CRITICAL: Entropy source lock poisoned");
-    guard.get_entropy(buf)
-}
-
-/// Configure the entropy source to use for FIPS operations.
-///
-/// This function MUST be called before any FIPS operations are performed,
-/// ideally at application startup.
-pub fn set_entropy_source(source: Box<dyn EntropySource>) {
-    let mut guard = ENTROPY_SOURCE
-        .write()
-        .expect("FIPS CRITICAL: Entropy source lock poisoned");
-    *guard = source;
-}
-
-/// Get the name of the currently configured entropy source.
-pub fn entropy_source_name() -> &'static str {
-    let guard = ENTROPY_SOURCE
-        .read()
-        .expect("FIPS CRITICAL: Entropy source lock poisoned");
-    guard.name()
-}
-
-/// Configure entropy source to use only the kernel's getrandom().
-/// This is the default and is only FIPS-approved when the kernel
-/// is in FIPS mode.
-pub fn use_getrandom_entropy() {
-    set_entropy_source(Box::new(GetrandomSource::new()));
-}
-
-/// Configure entropy source to use only jitterentropy.
-/// This is FIPS-approved on any system (SP800-90B compliant).
-#[cfg(feature = "jitterentropy")]
-pub fn use_jitterentropy_entropy() -> Result<(), Error> {
-    use crate::entropy::jitterentropy::JitterentropySource;
-    let source = JitterentropySource::new_fips()?;
-    set_entropy_source(Box::new(source));
-    Ok(())
+/// Get the name of the entropy source used by the FIPS provider.
+/// This is determined at compile time.
+pub const fn entropy_source_name() -> &'static str {
+    #[cfg(feature = "jitterentropy")]
+    {
+        "jitterentropy"
+    }
+    #[cfg(not(feature = "jitterentropy"))]
+    {
+        "getrandom"
+    }
 }
 
 /// Check if the Linux kernel is running in FIPS mode.
@@ -82,21 +55,23 @@ pub fn is_kernel_fips_mode() -> bool {
         .unwrap_or(false)
 }
 
-/// Automatically configure the best FIPS-compliant entropy source.
-///
-/// Uses getrandom if kernel is in FIPS mode, otherwise uses jitterentropy.
-#[cfg(feature = "jitterentropy")]
-pub fn use_fips_compliant_entropy() -> Result<&'static str, Error> {
-    if is_kernel_fips_mode() {
-        use_getrandom_entropy();
-        Ok("getrandom")
-    } else {
-        use_jitterentropy_entropy()?;
-        Ok("jitterentropy")
-    }
+/* Entropy callbacks for OpenSSL FIPS provider
+ *
+ * These callbacks are registered with the FIPS provider and are called
+ * when it needs entropy. With `enable-fips-jitter`, these callbacks are
+ * typically not called as the FIPS provider uses its internal JITTER
+ * seed source. However, they are still needed for nonce generation and
+ * as a fallback.
+ */
+
+/// Internal function to get entropy using getrandom.
+fn get_entropy_internal(buf: &mut [u8]) -> Result<usize, Error> {
+    use crate::entropy::{EntropySource, GetrandomSource};
+
+    let source = GetrandomSource::new();
+    source.get_entropy(buf)
 }
 
-/* Entropy Stuff */
 unsafe extern "C" fn fips_get_entropy(
     _handle: *const OSSL_CORE_HANDLE,
     pout: *mut *mut c_uchar,
@@ -1270,57 +1245,31 @@ pub(crate) fn pkey_type_name(pkey: *const EVP_PKEY) -> *const c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::entropy::GetrandomSource;
-    use serial_test::serial;
 
     #[test]
     fn test_entropy_source_name() {
         let name = entropy_source_name();
         assert!(!name.is_empty());
+        // Verify compile-time selection
+        #[cfg(feature = "jitterentropy")]
+        assert_eq!(name, "jitterentropy");
+        #[cfg(not(feature = "jitterentropy"))]
+        assert_eq!(name, "getrandom");
     }
 
     #[test]
     fn test_is_kernel_fips_mode() {
+        // Just verify it doesn't panic
         let _fips_mode = is_kernel_fips_mode();
     }
 
     #[test]
-    #[serial]
-    fn test_use_getrandom_entropy() {
-        use_getrandom_entropy();
-        assert_eq!(entropy_source_name(), "getrandom");
-    }
-
-    #[test]
-    #[serial]
-    fn test_set_entropy_source() {
-        set_entropy_source(Box::new(GetrandomSource::new()));
+    fn test_get_entropy_internal() {
         let mut buf = [0u8; 64];
         let result = get_entropy_internal(&mut buf);
         assert!(result.is_ok());
-        use_getrandom_entropy();
-    }
-
-    #[cfg(feature = "jitterentropy")]
-    mod jitterentropy_tests {
-        use super::*;
-
-        #[test]
-        #[serial]
-        fn test_use_jitterentropy_entropy() {
-            if use_jitterentropy_entropy().is_ok() {
-                assert_eq!(entropy_source_name(), "jitterentropy");
-                use_getrandom_entropy();
-            }
-        }
-
-        #[test]
-        #[serial]
-        fn test_use_fips_compliant_entropy() {
-            if let Ok(name) = use_fips_compliant_entropy() {
-                assert!(name == "getrandom" || name == "jitterentropy");
-                use_getrandom_entropy();
-            }
-        }
+        assert_eq!(result.unwrap(), 64);
+        // Verify we got some non-zero bytes (statistically very unlikely to be all zeros)
+        assert!(buf.iter().any(|&b| b != 0));
     }
 }

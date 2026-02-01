@@ -547,16 +547,11 @@ extern "C" fn fn_initialize(_init_args: CK_VOID_PTR) -> CK_RV {
     } else {
         #[cfg(feature = "fips")]
         {
-            match gconf.conf.entropy_source.apply() {
-                Ok(_name) => {
-                    #[cfg(feature = "log")]
-                    log::info!("Configured entropy source: {}", _name);
-                }
-                Err(_msg) => {
-                    #[cfg(feature = "log")]
-                    log::warn!("Entropy source configuration: {}", _msg);
-                }
-            }
+            #[cfg(feature = "log")]
+            log::info!(
+                "FIPS entropy source: {}",
+                ossl::fips::entropy_source_name()
+            );
         }
         wstate.initialize();
     }

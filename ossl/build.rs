@@ -108,51 +108,58 @@ fn ossl_bindings(args: &mut Vec<String>, out_file: &Path) {
         .expect("Couldn't write bindings!");
 }
 
-fn build_ossl(out_file: &Path) {
+/// Build OpenSSL from source.
+///
+/// # Arguments
+///
+/// * `out_file` - Path to write the generated bindings
+/// * `jitter_info` - Optional jitterentropy build info for FIPS+jitter builds
+#[allow(unused_variables)]
+fn build_ossl(out_file: &Path, jitter_info: Option<&JitterentropyBuildInfo>) {
     let sources = std::env::var("KRYOPTIC_OPENSSL_SOURCES")
         .expect("Env var KRYOPTIC_OPENSSL_SOURCES is not defined");
     let openssl_path = std::path::PathBuf::from(sources)
         .canonicalize()
         .expect("cannot canonicalize OpenSSL path");
 
-    let mut buildargs = vec![
-        "no-deprecated",
-        "no-aria",
-        "no-argon2",
-        "no-atexit",
-        "no-des",
-        "no-dsa",
-        "no-cast",
-        "no-mdc2",
-        "no-ec2m",
-        "no-rc2",
-        "no-rc4",
-        "no-rc5",
-        "no-rmd160",
-        "no-seed",
-        "no-sm2",
-        "no-sm3",
-        "no-sm4",
+    let mut buildargs: Vec<String> = vec![
+        "no-deprecated".to_string(),
+        "no-aria".to_string(),
+        "no-argon2".to_string(),
+        "no-atexit".to_string(),
+        "no-des".to_string(),
+        "no-dsa".to_string(),
+        "no-cast".to_string(),
+        "no-mdc2".to_string(),
+        "no-ec2m".to_string(),
+        "no-rc2".to_string(),
+        "no-rc4".to_string(),
+        "no-rc5".to_string(),
+        "no-rmd160".to_string(),
+        "no-seed".to_string(),
+        "no-sm2".to_string(),
+        "no-sm3".to_string(),
+        "no-sm4".to_string(),
     ];
 
     match std::env::var("CARGO_CFG_TARGET_ARCH") {
         Ok(arch) => match arch.as_str() {
             "x86" => {
-                buildargs.insert(0, "linux-elf");
-                buildargs.push("-m32");
-                buildargs.push("-latomic");
+                buildargs.insert(0, "linux-elf".to_string());
+                buildargs.push("-m32".to_string());
+                buildargs.push("-latomic".to_string());
             }
-            "x86_64" => buildargs.push("enable-ec_nistp_64_gcc_128"),
-            "aarch64" => buildargs.push("enable-ec_nistp_64_gcc_128"),
-            "powerpc64" => buildargs.push("enable-ec_nistp_64_gcc_128"),
-            "s390x" => buildargs.push("no-ec_nistp_64_gcc_128"),
+            "x86_64" => buildargs.push("enable-ec_nistp_64_gcc_128".to_string()),
+            "aarch64" => buildargs.push("enable-ec_nistp_64_gcc_128".to_string()),
+            "powerpc64" => buildargs.push("enable-ec_nistp_64_gcc_128".to_string()),
+            "s390x" => buildargs.push("no-ec_nistp_64_gcc_128".to_string()),
             _ => (),
         },
         _ => panic!("No arch available in CARGO_CFG_TARGET_ARCH"),
     }
 
     if env::var("PROFILE").unwrap().as_str() == "debug" {
-        buildargs.push("--debug");
+        buildargs.push("--debug".to_string());
     }
 
     let mut defines = "-DDEVRANDOM=\\\"/dev/urandom\\\"".to_string();
@@ -161,7 +168,7 @@ fn build_ossl(out_file: &Path) {
     let ar_name: &str;
 
     if cfg!(feature = "fips") {
-        buildargs.push("enable-fips");
+        buildargs.push("enable-fips".to_string());
 
         defines.push_str(" -DOPENSSL_PEDANTIC_ZEROIZATION");
 
@@ -192,6 +199,30 @@ fn build_ossl(out_file: &Path) {
             fips_build,
         ));
 
+        // When the jitterentropy feature is enabled, configure OpenSSL's FIPS
+        // provider to use jitterentropy directly for DRBG seeding.
+        //
+        // With enable-fips-jitter, OpenSSL's FIPS provider creates an internal
+        // JITTER seed source and uses it for all entropy needs. This is an
+        // SP800-90B compliant entropy source that works on any system.
+        //
+        // Without jitterentropy, the FIPS provider uses getrandom() via callbacks.
+        #[cfg(feature = "jitterentropy")]
+        if let Some(jent) = jitter_info {
+            buildargs.push("enable-jitter".to_string());
+            buildargs.push("enable-fips-jitter".to_string());
+            buildargs.push(format!(
+                "--with-jitter-lib={}",
+                jent.lib_dir.display()
+            ));
+            buildargs.push(format!(
+                "--with-jitter-include={}",
+                jent.include_dir.display()
+            ));
+        }
+        #[cfg(not(feature = "jitterentropy"))]
+        let _ = jitter_info; // Suppress unused warning
+
         ar_name = "fips";
         ar_path = openssl_path
             .join("providers")
@@ -202,7 +233,7 @@ fn build_ossl(out_file: &Path) {
         ar_name = "crypto";
     }
 
-    buildargs.push(&defines);
+    buildargs.push(defines);
 
     let libpath = format!("{}/lib{}.a", ar_path.to_string_lossy(), ar_name);
 
@@ -227,7 +258,7 @@ fn build_ossl(out_file: &Path) {
             /* openssl: ./Configure --debug enable-fips */
             if !std::process::Command::new("./Configure")
                 .current_dir(&openssl_path)
-                .args(buildargs)
+                .args(&buildargs)
                 .stdout(std::process::Stdio::inherit())
                 .stderr(std::process::Stdio::inherit())
                 .output()
@@ -272,6 +303,8 @@ fn build_ossl(out_file: &Path) {
 
     ossl_bindings(&mut args, out_file);
 }
+
+
 
 fn use_system_ossl(out_file: &Path) {
     let library = pkg_config::Config::new()
@@ -348,12 +381,25 @@ fn use_system_jitterentropy() {
     println!("cargo:rustc-link-lib=pthread");
 }
 
-/// Build the jitterentropy library from source (for FIPS builds).
+/// Information about the built jitterentropy library.
+///
+/// Used to pass jitterentropy paths to OpenSSL's Configure script.
+#[allow(dead_code)]
+struct JitterentropyBuildInfo {
+    /// Path to the directory containing libjitterentropy.a
+    lib_dir: PathBuf,
+    /// Path to the jitterentropy source/include directory
+    include_dir: PathBuf,
+}
+
+/// Build the jitterentropy library from source.
 ///
 /// IMPORTANT: Jitterentropy MUST be compiled with -O0 (no optimization)
 /// to preserve the timing jitter that provides entropy.
+///
+/// Returns build info that can be used by OpenSSL's configure.
 #[cfg(feature = "jitterentropy")]
-fn build_jitterentropy_from_source() {
+fn build_jitterentropy_from_source() -> JitterentropyBuildInfo {
     // Jitterentropy sources must be provided via environment variable,
     // consistent with how OpenSSL sources are handled for FIPS builds.
     let jent_path = std::env::var("KRYOPTIC_JITTERENTROPY_SOURCES")
@@ -501,6 +547,14 @@ fn build_jitterentropy_from_source() {
 
     // Link pthread for internal timer support
     println!("cargo:rustc-link-lib=pthread");
+
+    // Get the output directory where cc crate placed libjitterentropy.a
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+
+    JitterentropyBuildInfo {
+        lib_dir: out_dir,
+        include_dir: jent_path,
+    }
 }
 
 fn set_pretty_panic() {
@@ -536,23 +590,49 @@ fn main() {
     /* Always emit known configs */
     println!("cargo::rustc-check-cfg=cfg(ossl_v307,ossl_v320,ossl_v350,ossl_v400,ossl_mldsa,ossl_mlkem,ossl_slhdsa,param_clear_free)");
 
-    /* OpenSSL Cryptography */
+    /* Dynamic builds: use system libraries */
     if cfg!(feature = "dynamic") {
         use_system_ossl(&ossl_bindings);
-    } else {
-        build_ossl(&ossl_bindings);
-    }
 
-    /* Jitterentropy library */
-    #[cfg(feature = "jitterentropy")]
-    {
-        if cfg!(feature = "dynamic") {
-            // Dynamic builds: link to system libjitterentropy.so
-            use_system_jitterentropy();
-        } else {
-            // FIPS builds: compile from source for reproducibility
-            build_jitterentropy_from_source();
-        }
+        // For dynamic builds with jitterentropy, link to system libjitterentropy.so
+        // Kryoptic uses this directly for its entropy callbacks
+        #[cfg(feature = "jitterentropy")]
+        use_system_jitterentropy();
+    } else {
+        // Static/FIPS builds: compile from source
+        //
+        // For FIPS + jitterentropy builds:
+        // 1. Build jitterentropy library
+        // 2. Build OpenSSL with enable-fips-jitter (uses jitterentropy for DRBG seeding)
+        // 3. Link jitterentropy statically
+        //
+        // Without jitterentropy feature:
+        // - OpenSSL FIPS provider uses getrandom() via callbacks
+
+        #[cfg(feature = "jitterentropy")]
+        let jitter_info = {
+            // Build jitterentropy library
+            let info = build_jitterentropy_from_source();
+
+            // Link jitterentropy statically
+            println!(
+                "cargo:rustc-link-search=native={}",
+                info.lib_dir.display()
+            );
+            println!("cargo:rustc-link-lib=static=jitterentropy");
+
+            Some(info)
+        };
+
+        #[cfg(not(feature = "jitterentropy"))]
+        let jitter_info: Option<&JitterentropyBuildInfo> = None;
+
+        // Build OpenSSL with jitterentropy info if available
+        #[cfg(feature = "jitterentropy")]
+        build_ossl(&ossl_bindings, jitter_info.as_ref());
+
+        #[cfg(not(feature = "jitterentropy"))]
+        build_ossl(&ossl_bindings, jitter_info);
     }
 
     println!("cargo:rerun-if-changed=build.rs");
