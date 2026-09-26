@@ -6,7 +6,7 @@
 //! enough scaffolding to be able to use it directly instead of using
 //! it through libcrypto.
 
-use std::ffi::{c_char, c_int, c_uchar, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,124 +14,15 @@ use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::{LazyLock, Mutex};
 
+use super::entropy::{fips_cleanup_entropy, fips_get_entropy, fips_get_nonce};
 use crate::error::Result;
-use crate::misc::{bytes_to_slice, bytes_to_slice_mut};
+use crate::misc::bytes_to_slice_mut;
 use crate::ossl::common::osslctx;
 
 use ossl::bindings::*;
 use ossl::OsslContext;
 
 use libc;
-
-/* Entropy Stuff */
-unsafe extern "C" fn fips_get_entropy(
-    _handle: *const OSSL_CORE_HANDLE,
-    pout: *mut *mut c_uchar,
-    entropy: c_int,
-    min_len: usize,
-    max_len: usize,
-) -> usize {
-    if pout.is_null() {
-        return 0;
-    }
-    let Ok(mut len) = usize::try_from(entropy) else {
-        return 0;
-    };
-    if len < min_len {
-        len = min_len;
-    }
-    if len > max_len {
-        len = max_len;
-    }
-
-    let out = unsafe { fips_malloc(len, null(), 0) };
-    if out.is_null() {
-        return 0;
-    }
-
-    /* On RHEL we really want to use GRND_RANDOM as that guarantees the
-     * validated entropy source is used when the kernel is booted in fips
-     * mode */
-    let mut res: isize = 0;
-    let mut l = len;
-    while (res as usize) < len {
-        let r = unsafe {
-            libc::getrandom(out.byte_offset(res), l, libc::GRND_RANDOM)
-        };
-        if r == -1 {
-            unsafe { fips_clear_free(out, len, null(), 0) };
-            return 0;
-        }
-        res += r;
-        match usize::try_from(r) {
-            Err(_) => {
-                unsafe { fips_clear_free(out, len, null(), 0) };
-                return 0;
-            }
-            Ok(ur) => l -= ur,
-        };
-    }
-
-    unsafe { *pout = out as *mut u8 };
-    len
-}
-
-unsafe extern "C" fn fips_cleanup_entropy(
-    _handle: *const OSSL_CORE_HANDLE,
-    buf: *mut c_uchar,
-    len: usize,
-) {
-    unsafe { fips_clear_free(buf as *mut c_void, len, null(), 0) }
-}
-
-unsafe extern "C" fn fips_get_nonce(
-    handle: *const OSSL_CORE_HANDLE,
-    pout: *mut *mut c_uchar,
-    min_len: usize,
-    max_len: usize,
-    salt: *const c_void,
-    salt_len: usize,
-) -> usize {
-    /* FIXME: OpenSSL returns some timer + salt string,
-     * we return just getrandom data | salt string.
-     * Need to check if this is ok */
-
-    if pout.is_null() {
-        return 0;
-    }
-    let Ok(entropy) = c_int::try_from(min_len) else {
-        return 0;
-    };
-
-    let out =
-        unsafe { fips_get_entropy(handle, pout, entropy, min_len, max_len) };
-    if out == 0 {
-        return 0;
-    }
-    if out < min_len {
-        unsafe {
-            fips_cleanup_entropy(handle, *pout, out);
-            *pout = null_mut();
-        }
-        return 0;
-    }
-
-    if !salt.is_null() && salt_len > 0 {
-        let mut len = out;
-        if salt_len < len {
-            len = salt_len;
-        }
-
-        let r = bytes_to_slice_mut(unsafe { *pout }, len).unwrap();
-        let s = bytes_to_slice(salt as *const u8, len);
-
-        for p in r.iter_mut().zip(s.iter()) {
-            *p.0 |= *p.1;
-        }
-    }
-
-    return out;
-}
 
 #[cfg(test)]
 static FIPS_MODULE_MAC: &CStr = c"2B:50:2F:5B:7C:78:13:E5:32:F2:EA:70:1F:D7:E1:96:A6:18:FB:00:D3:80:51:EA:D0:7F:A8:3C:11:9C:59:32";
@@ -475,7 +366,7 @@ unsafe fn fips_cleanse(addr: *mut c_void, pos: usize, len: usize) {
     unsafe { OPENSSL_cleanse(addr.wrapping_add(pos), len) }
 }
 
-unsafe extern "C" fn fips_malloc(
+pub(super) unsafe extern "C" fn fips_malloc(
     num: usize,
     _file: *const std::os::raw::c_char,
     _line: std::os::raw::c_int,
@@ -499,7 +390,7 @@ unsafe extern "C" fn fips_free(
     unsafe { libc::free(ptr) };
 }
 
-unsafe extern "C" fn fips_clear_free(
+pub(super) unsafe extern "C" fn fips_clear_free(
     ptr: *mut c_void,
     num: usize,
     file: *const c_char,

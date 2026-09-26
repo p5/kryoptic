@@ -18,6 +18,12 @@ pub fn set_error_state() {
     };
 }
 
+pub fn set_crng_error_state() {
+    unsafe {
+        ossl_set_error_state(OSSL_SELF_TEST_TYPE_CRNG.as_ptr() as *const c_char)
+    };
+}
+
 pub fn check_state_ok() -> bool {
     if unsafe { ossl_prov_is_running() } == 0 {
         return false;

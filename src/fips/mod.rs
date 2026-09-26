@@ -12,6 +12,7 @@ use crate::pkcs11::*;
 
 use ossl::{bindings, fips};
 
+pub(crate) mod entropy;
 pub(crate) mod indicators;
 pub(crate) mod kats;
 
@@ -22,6 +23,11 @@ pub const FIPS_VALIDATION_OBJ: CK_ULONG = 1;
 /// Sets the FIPS module into the error state
 pub fn set_fips_error_state() {
     fips::set_error_state();
+}
+
+/// Sets the FIPS provider error state after an entropy source failure.
+pub(crate) fn set_entropy_error_state() {
+    fips::set_crng_error_state();
 }
 
 /// Checks if the FIPS module is in an error state
