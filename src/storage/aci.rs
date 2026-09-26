@@ -147,7 +147,7 @@ fn encrypt_key(
     key: &[u8],
 ) -> Result<Vec<u8>> {
     let mut salt: [u8; SHA256_LEN] = [0u8; SHA256_LEN];
-    CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut salt))?;
+    CSPRNG.with(|rng| rng.generate_random(&mut salt))?;
 
     let pbkdf2_params = pkcs::PBKDF2Params {
         salt: &salt,

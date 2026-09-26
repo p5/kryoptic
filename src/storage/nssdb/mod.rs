@@ -1546,7 +1546,7 @@ impl Storage for NSSStorage {
             return Err(CKR_PIN_LEN_RANGE)?;
         }
         let mut salt: [u8; NSS_PIN_SALT_LEN] = [0u8; NSS_PIN_SALT_LEN];
-        CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut salt))?;
+        CSPRNG.with(|rng| rng.generate_random(&mut salt))?;
 
         let enckey = enckey_derive(facilities, pin, &salt)?;
         let mut newkeys = KeysWithCaching::default();

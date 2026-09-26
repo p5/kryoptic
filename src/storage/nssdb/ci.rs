@@ -295,7 +295,7 @@ fn aes_cbc_encrypt(
     let mut iv: [u8; 16] = [0u8; 16];
     iv[0] = 0x04;
     iv[1] = 0x0e;
-    CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut iv[2..]))?;
+    CSPRNG.with(|rng| rng.generate_random(&mut iv[2..]))?;
 
     let ck_mech = CK_MECHANISM {
         mechanism: CKM_AES_CBC_PAD,
@@ -450,7 +450,7 @@ pub fn encrypt_data(
 ) -> Result<Vec<u8>> {
     /* SHA2-256 length */
     let mut salt: [u8; SHA256_LEN] = [0u8; SHA256_LEN];
-    CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut salt))?;
+    CSPRNG.with(|rng| rng.generate_random(&mut salt))?;
 
     let pbkdf2_params = PBKDF2Params {
         salt: &salt,
@@ -653,7 +653,7 @@ pub fn make_signature(
     iterations: usize,
 ) -> Result<Vec<u8>> {
     let mut salt: [u8; SHA256_LEN] = [0u8; SHA256_LEN];
-    CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut salt))?;
+    CSPRNG.with(|rng| rng.generate_random(&mut salt))?;
 
     let pbkdf2_params = PBKDF2Params {
         salt: &salt,

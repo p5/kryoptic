@@ -41,7 +41,7 @@ pub mod fns;
 pub mod pkcs11;
 
 use config::Config;
-use error::Result;
+use error::{Error, Result};
 use pkcs11::*;
 use rng::RNG;
 use session::Session;
@@ -60,26 +60,56 @@ use fns::stmgmt::*;
 use fns::*;
 
 thread_local!(
-    /// Thread-local instance of the Cryptographically Secure Pseudo-Random Number
-    /// Generator (CSPRNG). This is used to avoid contention and locking between
-    /// different threads.
-    static CSPRNG: RefCell<RNG> = RefCell::new(
-        RNG::new("HMAC DRBG SHA256").unwrap()
-    )
+    static CSPRNG_STATE: RefCell<Option<RNG>> = const { RefCell::new(None) }
 );
+
+/// Provides access to the thread-local cryptographic random generator.
+pub(crate) struct ThreadRng;
+
+pub(crate) static CSPRNG: ThreadRng = ThreadRng;
+
+impl ThreadRng {
+    pub(crate) fn with<T>(
+        &self,
+        operation: impl FnOnce(&mut RNG) -> Result<T>,
+    ) -> Result<T> {
+        #[cfg(feature = "fips")]
+        if !fips::check_fips_state_ok() {
+            return Err(CKR_DEVICE_ERROR)?;
+        }
+
+        CSPRNG_STATE
+            .try_with(|state| {
+                let mut state =
+                    state.try_borrow_mut().map_err(|_| CKR_DEVICE_ERROR)?;
+                if state.is_none() {
+                    *state = Some(RNG::new("HMAC DRBG SHA256")?);
+                }
+                let rng = state.as_mut().ok_or(CKR_DEVICE_ERROR)?;
+                operation(rng)
+            })
+            .map_err(|_| Error::ck_rv(CKR_DEVICE_ERROR))?
+    }
+}
 
 /// Fill a buffer with random data
 ///
 /// Uses the instantaited CSPRNG to fill the buffer with random data
 fn get_random_data(data: &mut [u8]) -> Result<()> {
-    CSPRNG.with(|rng| rng.borrow_mut().generate_random(data))
+    match CSPRNG.with(|rng| rng.generate_random(data)) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            crate::misc::zeromem(data);
+            Err(error)
+        }
+    }
 }
 
 /// Add seed data to the CSPRNG
 ///
 /// This is not counted as entropy but just as additional data
 fn random_add_seed(data: &[u8]) -> Result<()> {
-    CSPRNG.with(|rng| rng.borrow_mut().add_seed(data))
+    CSPRNG.with(|rng| rng.add_seed(data))
 }
 
 /// Global state for the PKCS#11 library.

@@ -126,16 +126,21 @@ impl Object {
 
     /// Generates the internal per object unique id
     /// This is generally called at object creation or import
-    pub fn generate_unique(&mut self) {
+    pub fn generate_unique(&mut self) -> Result<()> {
         if !self
             .attributes
             .iter()
             .any(|r| r.get_type() == CKA_UNIQUE_ID)
         {
-            let uuid = Uuid::new_v4().to_string();
+            let mut bytes = [0; 16];
+            crate::get_random_data(&mut bytes)?;
+            bytes[6] = (bytes[6] & 0x0f) | 0x40;
+            bytes[8] = (bytes[8] & 0x3f) | 0x80;
+            let uuid = Uuid::from_bytes(bytes).to_string();
             self.attributes
                 .push(Attribute::from_string(CKA_UNIQUE_ID, uuid));
         }
+        Ok(())
     }
 
     /// Generates the internal per object unique id using a stable input
@@ -165,7 +170,7 @@ impl Object {
     /// unique id
     pub fn blind_copy(&self) -> Result<Object> {
         let mut obj = Object::new(self.class);
-        obj.generate_unique();
+        obj.generate_unique()?;
         for attr in &self.attributes {
             if attr.get_type() == CKA_UNIQUE_ID {
                 continue;

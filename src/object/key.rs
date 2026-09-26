@@ -64,7 +64,7 @@ pub trait KeyFactory: ObjectFactory {
             unacceptable_flags,
             required_flags,
         )?;
-        obj.generate_unique();
+        obj.generate_unique()?;
         Ok(obj)
     }
 
@@ -482,9 +482,7 @@ pub fn default_secret_key_generate(key: &mut Object) -> Result<()> {
     let value_len = usize::try_from(key.get_attr_as_ulong(CKA_VALUE_LEN)?)?;
 
     let mut value: Vec<u8> = vec![0; value_len];
-    match CSPRNG
-        .with(|rng| rng.borrow_mut().generate_random(value.as_mut_slice()))
-    {
+    match CSPRNG.with(|rng| rng.generate_random(value.as_mut_slice())) {
         Ok(()) => (),
         Err(e) => return Err(e),
     }

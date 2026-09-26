@@ -22,7 +22,13 @@ impl RNG {
 
     pub fn generate_random(&mut self, buffer: &mut [u8]) -> Result<()> {
         let noaddtl: [u8; 0] = [];
-        self.drbg.generate(&noaddtl, buffer)
+        match self.drbg.generate(&noaddtl, buffer) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                crate::misc::zeromem(buffer);
+                Err(error)
+            }
+        }
     }
 
     pub fn add_seed(&mut self, buffer: &[u8]) -> Result<()> {

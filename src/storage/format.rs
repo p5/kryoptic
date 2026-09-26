@@ -230,7 +230,7 @@ impl StdStorageFormat {
         }
         /* Generate and store a random serial number */
         let mut value: [u8; 8] = [0u8; 8];
-        CSPRNG.with(|rng| rng.borrow_mut().generate_random(&mut value))?;
+        CSPRNG.with(|rng| rng.generate_random(&mut value))?;
         info.serial.copy_from_slice(hex::encode(value).as_bytes());
         self.store.store_token_info(&info)?;
         Ok(info)

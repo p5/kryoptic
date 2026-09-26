@@ -372,7 +372,7 @@ pub trait ObjectFactory: Debug + Send + Sync {
             OAFlags::NeverSettable,
             OAFlags::RequiredOnCreate,
         )?;
-        obj.generate_unique();
+        obj.generate_unique()?;
         Ok(obj)
     }
 
