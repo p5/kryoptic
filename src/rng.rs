@@ -32,7 +32,15 @@ impl RNG {
     }
 
     pub fn add_seed(&mut self, buffer: &[u8]) -> Result<()> {
-        let noaddtl: [u8; 0] = [];
-        self.drbg.reseed(buffer, &noaddtl)
+        #[cfg(feature = "fips")]
+        {
+            let no_entropy: [u8; 0] = [];
+            self.drbg.reseed(&no_entropy, buffer)
+        }
+        #[cfg(not(feature = "fips"))]
+        {
+            let no_additional_input: [u8; 0] = [];
+            self.drbg.reseed(buffer, &no_additional_input)
+        }
     }
 }

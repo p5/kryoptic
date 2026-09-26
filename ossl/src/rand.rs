@@ -242,7 +242,11 @@ impl EvpRandCtx {
             EVP_RAND_reseed(
                 self.ptr,
                 1,
-                entropy.as_ptr(),
+                if entropy.is_empty() {
+                    std::ptr::null()
+                } else {
+                    entropy.as_ptr()
+                },
                 entropy.len(),
                 addtl.as_ptr(),
                 addtl.len(),

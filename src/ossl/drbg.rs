@@ -69,11 +69,18 @@ impl DRBG for HmacDrbg {
     ///
     /// Corresponds to the Reseed operation in NIST SP 800-90A.
     fn reseed(&mut self, entropy: &[u8], addtl: &[u8]) -> Result<()> {
-        if entropy.len() < self.min_entropy {
-            return Err(CKR_ARGUMENTS_BAD)?;
-        }
-        if self.max_entropy > 0 && entropy.len() > self.max_entropy {
-            return Err(CKR_ARGUMENTS_BAD)?;
+        #[cfg(feature = "fips")]
+        let check_entropy_length = !entropy.is_empty();
+        #[cfg(not(feature = "fips"))]
+        let check_entropy_length = true;
+
+        if check_entropy_length {
+            if entropy.len() < self.min_entropy {
+                return Err(CKR_ARGUMENTS_BAD)?;
+            }
+            if self.max_entropy > 0 && entropy.len() > self.max_entropy {
+                return Err(CKR_ARGUMENTS_BAD)?;
+            }
         }
         if self.max_addin > 0 && addtl.len() > self.max_addin {
             return Err(CKR_ARGUMENTS_BAD)?;

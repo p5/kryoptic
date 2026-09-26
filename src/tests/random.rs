@@ -29,13 +29,23 @@ fn test_random_seed_entropy() {
     let mut testtokn = TestToken::initialized("test_random_seed_entropy", None);
     let session = testtokn.get_session(false);
 
-    // min entropy is 32 bytes for the default DRBG, anything less should fail
+    #[cfg(not(feature = "fips"))]
+    {
+        let empty_seed: &mut [u8] = &mut [];
+        let ret = fn_seed_random(session, empty_seed.as_mut_ptr(), 0);
+        assert_eq!(ret, CKR_ARGUMENTS_BAD);
+    }
+
+    // FIPS treats caller seed data as additional input, not entropy.
     let short_seed: &mut [u8] = &mut [1; 31];
     let ret = fn_seed_random(
         session,
         short_seed.as_mut_ptr(),
         short_seed.len() as CK_ULONG,
     );
+    #[cfg(feature = "fips")]
+    assert_eq!(ret, CKR_OK);
+    #[cfg(not(feature = "fips"))]
     assert_eq!(ret, CKR_ARGUMENTS_BAD);
 
     // 32 bytes should be fine
