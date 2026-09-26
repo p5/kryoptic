@@ -66,6 +66,53 @@ The `--feature fips` builds create a token linking just to OpenSSL libfips.a
 and enable FIPS behavior, restricting how algorithms behave and reporting
 FIPS indicators for (non)approved algorithms and operations. It forces the
 presence of the PKCS#11 3.2 interfaces as well as the PQC algorithms.
+The `fips` build uses the kernel entropy source.
+
+The `fips-jitterentropy` feature implies `fips` and links to a prebuilt JENT
+shared library. Cargo does not compile JENT. Set
+`KRYOPTIC_JITTERENTROPY_LIB_DIR` to the directory with the JENT shared library.
+Set `KRYOPTIC_JITTERENTROPY_INCLUDE_DIR` to the directory with
+`jitterentropy.h`. It defaults to the library directory. The build generates
+Rust bindings from that header and links `libjitterentropy.so`.
+Use a JENT header and library pair with a compatible ABI. Before distribution,
+confirm that the exact package and operating environment meet the applicable
+ESV requirements.
+
+The adapter uses the public API in JENT v3.7.0. Initialization runs JENT's
+startup tests. Collector allocation repeats them when needed. Each entropy read
+uses `jent_read_entropy_safe()`, which checks runtime health and can replace a
+collector after a health failure. Kryoptic checks the reported FIPS mode,
+secure-memory support, and timer settings. These API checks do not establish
+entropy credit or ESV approval. JENT v3.7.0 uses XDRBG-256, so the lab must
+classify that output path and assess the exact library build and operating
+environment. Kryoptic does not pin the JENT package digest or source revision.
+The tests use the released v3.7.0 API as a compatibility fixture.
+
+The JENT build sets `JENT_FORCE_FIPS`, which requires secure memory. Set
+`RLIMIT_MEMLOCK` high enough for the maximum number of threads that request
+entropy. Kryoptic creates one JENT collector for each such thread. More threads
+need more locked memory, and the exact amount depends on JENT's configuration.
+If JENT cannot lock enough memory, the first random request fails and sets the
+FIPS provider's error state. Check the process limit with `ulimit -l`. For a
+systemd service, set `LimitMEMLOCK` and test the limit with the maximum thread
+count.
+
+Set `KRYOPTIC_OPENSSL_SOURCES` to the OpenSSL source tree selected for the
+FIPS build. The source tree must support `no-fips-jitter`. Kryoptic disables
+OpenSSL's separate JENT source. Install the selected JENT library in the runtime
+loader path. Build Kryoptic with:
+
+```sh
+cargo build -p kryoptic --no-default-features --features fips-jitterentropy
+```
+
+The feature selects JENT at build time. It adds a required JENT SONAME
+dependency from the package. A missing library prevents module loading.
+The build has no runtime source selector. A JENT failure stops random output.
+The build does not fall back to kernel entropy.
+
+Other FIPS behavior, including PKCS#11 validation metadata, remains controlled
+by `fips`. Do not claim FIPS validation before CMVP issues the certificate.
 
 The FIPS build allows to specify the name, version, and additional build
 information returned by the embedded OpenSSL FIPS provider by setting the
