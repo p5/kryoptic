@@ -61,7 +61,49 @@ fn ossl_bindings(args: &mut Vec<String>, out_file: &Path) {
         .expect("Couldn't write bindings!");
 }
 
+fn check_fips_jitter_disabled(openssl_path: &Path, archive_path: &Path) {
+    println!(
+        "cargo:rerun-if-changed={}",
+        openssl_path.join("configdata.pm").display()
+    );
+    let status = std::process::Command::new("perl")
+        .arg("-I")
+        .arg(openssl_path)
+        .arg("-Mconfigdata")
+        .arg("-e")
+        .arg("exit(($configdata::disabled{'fips-jitter'} // '') eq 'option' ? 0 : 1)")
+        .status()
+        .expect("cannot inspect the OpenSSL FIPS configuration");
+    if !status.success() {
+        panic!(
+            "OpenSSL FIPS configuration must disable fips-jitter; clean and rebuild the selected source tree"
+        );
+    }
+
+    let archive = std::process::Command::new("ar")
+        .arg("t")
+        .arg(archive_path)
+        .output()
+        .expect("cannot inspect the OpenSSL FIPS archive");
+    if !archive.status.success() {
+        panic!("cannot inspect the OpenSSL FIPS archive");
+    }
+    // This OpenSSL build adds `seed_src_jitter.c` to the FIPS archive.
+    if String::from_utf8_lossy(&archive.stdout)
+        .lines()
+        .any(|member| {
+            member.contains("seed_src_jitter")
+                || member.contains("jitterentropy")
+        })
+    {
+        panic!(
+            "OpenSSL FIPS archive contains an internal JENT source; clean and rebuild with no-fips-jitter"
+        );
+    }
+}
+
 fn build_ossl(out_file: &Path) {
+    println!("cargo:rerun-if-env-changed=KRYOPTIC_OPENSSL_SOURCES");
     let sources = std::env::var("KRYOPTIC_OPENSSL_SOURCES")
         .expect("Env var KRYOPTIC_OPENSSL_SOURCES is not defined");
     let openssl_path = std::path::PathBuf::from(sources)
@@ -117,6 +159,7 @@ fn build_ossl(out_file: &Path) {
 
     if cfg!(feature = "fips") {
         buildargs.push("enable-fips");
+        buildargs.push("no-fips-jitter");
 
         defines.push_str(" -DOPENSSL_PEDANTIC_ZEROIZATION");
 
@@ -213,6 +256,10 @@ fn build_ossl(out_file: &Path) {
                 panic!("could not build OpenSSL");
             }
         }
+    }
+
+    if cfg!(feature = "fips") {
+        check_fips_jitter_disabled(&openssl_path, Path::new(&libpath));
     }
 
     let include_path = format!(

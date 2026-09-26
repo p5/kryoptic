@@ -348,6 +348,8 @@ mod chacha20;
 #[cfg(feature = "rsa")]
 mod rsa;
 
+#[cfg(feature = "fips-jitterentropy")]
+mod jitterentropy;
 mod session;
 
 #[cfg(feature = "ecdsa")]

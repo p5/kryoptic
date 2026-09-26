@@ -1,6 +1,10 @@
 // Copyright 2025 Simo Sorce
 // See LICENSE.txt file for terms
 
+#[path = "build_support/jitterentropy.rs"]
+#[allow(dead_code)]
+mod jitterentropy;
+
 use std::env;
 use std::path::PathBuf;
 
@@ -38,6 +42,15 @@ impl bindgen::callbacks::ParseCallbacks for Pkcs11Callbacks {
 }
 
 fn main() {
+    if env::var_os("CARGO_FEATURE_FIPS_JITTERENTROPY").is_some() {
+        if env::var_os("CARGO_FEATURE_DYNAMIC").is_some()
+            || env::var_os("CARGO_FEATURE_OPENSSL_SYS").is_some()
+        {
+            panic!("fips-jitterentropy requires static OpenSSL FIPS linking");
+        }
+        jitterentropy::build();
+    }
+
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let pkcs11_bindings = out_path.join("pkcs11_bindings.rs");
 
@@ -62,4 +75,5 @@ fn main() {
         .expect("Couldn't write bindings!");
 
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build_support/jitterentropy.rs");
 }
